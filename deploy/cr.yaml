@@ -149,7 +149,7 @@ spec:
 #        path: /data
 #        type: Directory
       persistentVolumeClaim:
-#        storageClassName: standard
+        storageClassName: alicloud-nas
 #        accessModes: [ "ReadWriteOnce" ]
         resources:
           requests:
@@ -231,7 +231,7 @@ spec:
 #      periodSeconds: 30
 #      successThreshold: 1
 #      failureThreshold: 4
-#    serviceType: ClusterIP
+    serviceType: LoadBalancer
 #    externalTrafficPolicy: Cluster
 #    replicasServiceType: ClusterIP
 #    replicasExternalTrafficPolicy: Cluster

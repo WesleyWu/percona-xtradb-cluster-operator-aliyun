@@ -8,6 +8,22 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	Root         = "root"
+	Operator     = "operator"
+	Monitor      = "monitor"
+	Xtrabackup   = "xtrabackup"
+	Replication  = "replication"
+	ProxyAdmin   = "proxyadmin"
+	PMMServer    = "pmmserver"
+	PMMServerKey = "pmmserverkey"
+	Clustercheck = "clustercheck"
+)
+
+var UserNames = []string{Root, Operator, Monitor,
+	Xtrabackup, Replication, ProxyAdmin,
+	Clustercheck, PMMServer, PMMServerKey}
+
 type Manager struct {
 	db *sql.DB
 }
@@ -33,6 +49,7 @@ func NewManager(addr string, user, pass string, timeout int32) (Manager, error) 
 		"timeout":           timeoutStr,
 		"readTimeout":       timeoutStr,
 		"writeTimeout":      timeoutStr,
+		"tls":               "preferred",
 	}
 
 	mysqlDB, err := sql.Open("mysql", config.FormatDSN())
@@ -60,72 +77,142 @@ func (u *Manager) CreateOperatorUser(pass string) error {
 		return errors.Wrap(err, "grant operator user")
 	}
 
-	_, err = u.db.Exec("FLUSH PRIVILEGES")
-	if err != nil {
-		return errors.Wrap(err, "flush privileges")
-	}
-
 	return nil
 }
 
-func (u *Manager) UpdateUsersPass(users []SysUser) error {
-	if len(users) == 0 {
+// UpdateUserPassWithoutDP updates user pass without Dual Password
+// feature introduced in MsSQL 8
+func (u *Manager) UpdateUserPassWithoutDP(user *SysUser) error {
+	if user == nil {
 		return nil
 	}
 
-	for _, user := range users {
-		for _, host := range user.Hosts {
-			_, err := u.db.Exec("ALTER USER ?@? IDENTIFIED BY ?", user.Name, host, user.Pass)
-			if err != nil {
-				return errors.Wrap(err, "update password")
-			}
+	for _, host := range user.Hosts {
+		_, err := u.db.Exec("ALTER USER ?@? IDENTIFIED BY ?", user.Name, host, user.Pass)
+		if err != nil {
+			return errors.Wrap(err, "update password")
 		}
-	}
-
-	_, err := u.db.Exec("FLUSH PRIVILEGES")
-	if err != nil {
-			return errors.Wrap(err, "flush privileges")
 	}
 
 	return nil
 }
 
-func (u *Manager) UpdateProxyUsers(proxyUsers []SysUser) error {
+// UpdateUserPass updates user passwords but retains the current password
+// using Dual Password feature of MySQL 8.
+func (m *Manager) UpdateUserPass(user *SysUser) error {
+	if user == nil {
+		return nil
+	}
 
-	for _, user := range proxyUsers {
-		switch user.Name {
-		case "proxyadmin":
-			_, err := u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='admin-admin_credentials'", "proxyadmin:"+user.Pass)
-			if err != nil {
-					return errors.Wrap(err, "update proxy admin password")
-			}
-			_, err = u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='admin-cluster_password'", user.Pass)
-			if err != nil {
-					return errors.Wrap(err, "update proxy admin password")
-			}
-			_, err = u.db.Exec("LOAD ADMIN VARIABLES TO RUNTIME")
-			if err != nil {
-					return errors.Wrap(err, "load to runtime")
-			}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return errors.Wrap(err, "begin transaction")
+	}
 
-			_, err = u.db.Exec("SAVE ADMIN VARIABLES TO DISK")
-			if err != nil {
-					return errors.Wrap(err, "save to disk")
-			}
-		case "monitor":
-			_, err := u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='mysql-monitor_password'", user.Pass)
-			if err != nil {
-					return errors.Wrap(err, "update proxy monitor password")
-			}
-			_, err = u.db.Exec("LOAD MYSQL VARIABLES TO RUNTIME")
-			if err != nil {
-					return errors.Wrap(err, "load to runtime")
+	for _, host := range user.Hosts {
+		_, err = tx.Exec("ALTER USER ?@? IDENTIFIED BY ? RETAIN CURRENT PASSWORD", user.Name, host, user.Pass)
+		if err != nil {
+			err = errors.Wrap(err, "alter user")
+
+			if errT := tx.Rollback(); errT != nil {
+				return errors.Wrap(errors.Wrap(errT, "rollback"), err.Error())
 			}
 
-			_, err = u.db.Exec("SAVE MYSQL VARIABLES TO DISK")
-			if err != nil {
-					return errors.Wrap(err, "save to disk")
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return errors.Wrap(err, "commit transaction")
+	}
+
+	return nil
+}
+
+// DiscardOldPassword discards old passwords of given users
+func (m *Manager) DiscardOldPassword(user *SysUser) error {
+	if user == nil {
+		return nil
+	}
+
+	tx, err := m.db.Begin()
+	if err != nil {
+		return errors.Wrap(err, "begin transaction")
+	}
+
+	for _, host := range user.Hosts {
+		_, err = tx.Exec("ALTER USER ?@? DISCARD OLD PASSWORD", user.Name, host)
+		if err != nil {
+			err = errors.Wrap(err, "alter user")
+
+			if errT := tx.Rollback(); errT != nil {
+				return errors.Wrap(errors.Wrap(errT, "rollback"), err.Error())
 			}
+
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return errors.Wrap(err, "commit transaction")
+	}
+
+	return nil
+}
+
+// DiscardOldPassword discards old passwords of given users
+func (m *Manager) IsOldPassDiscarded(user *SysUser) (bool, error) {
+	var attributes sql.NullString
+	r := m.db.QueryRow("SELECT User_attributes FROM mysql.user WHERE user=?", user.Name)
+
+	err := r.Scan(&attributes)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return true, nil
+		}
+		return false, errors.Wrap(err, "select User_attributes field")
+	}
+
+	if attributes.Valid {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (u *Manager) UpdateProxyUser(user *SysUser) error {
+	switch user.Name {
+	case ProxyAdmin:
+		_, err := u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='admin-admin_credentials'", "proxyadmin:"+user.Pass)
+		if err != nil {
+			return errors.Wrap(err, "update proxy admin password")
+		}
+		_, err = u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='admin-cluster_password'", user.Pass)
+		if err != nil {
+			return errors.Wrap(err, "update proxy admin password")
+		}
+		_, err = u.db.Exec("LOAD ADMIN VARIABLES TO RUNTIME")
+		if err != nil {
+			return errors.Wrap(err, "load to runtime")
+		}
+
+		_, err = u.db.Exec("SAVE ADMIN VARIABLES TO DISK")
+		if err != nil {
+			return errors.Wrap(err, "save to disk")
+		}
+	case Monitor:
+		_, err := u.db.Exec("UPDATE global_variables SET variable_value=? WHERE variable_name='mysql-monitor_password'", user.Pass)
+		if err != nil {
+			return errors.Wrap(err, "update proxy monitor password")
+		}
+		_, err = u.db.Exec("LOAD MYSQL VARIABLES TO RUNTIME")
+		if err != nil {
+			return errors.Wrap(err, "load to runtime")
+		}
+
+		_, err = u.db.Exec("SAVE MYSQL VARIABLES TO DISK")
+		if err != nil {
+			return errors.Wrap(err, "save to disk")
 		}
 	}
 
@@ -138,7 +225,7 @@ func (u *Manager) Update160MonitorUserGrant(pass string) (err error) {
 
 	_, err = u.db.Exec("CREATE USER IF NOT EXISTS 'monitor'@'%' IDENTIFIED BY ?", pass)
 	if err != nil {
-			return errors.Wrap(err, "create operator user")
+		return errors.Wrap(err, "create operator user")
 	}
 
 	_, err = u.db.Exec("/*!80015 GRANT SERVICE_CONNECTION_ADMIN ON *.* TO 'monitor'@'%' */")
@@ -151,11 +238,6 @@ func (u *Manager) Update160MonitorUserGrant(pass string) (err error) {
 		return errors.Wrapf(err, "set max connections to user monitor")
 	}
 
-	_, err = u.db.Exec("FLUSH PRIVILEGES")
-	if err != nil {
-		return errors.Wrap(err, "flush privileges")
-	}
-
 	return nil
 }
 
@@ -164,7 +246,7 @@ func (u *Manager) Update170XtrabackupUser(pass string) (err error) {
 
 	_, err = u.db.Exec("CREATE USER IF NOT EXISTS 'xtrabackup'@'%' IDENTIFIED BY ?", pass)
 	if err != nil {
-			return errors.Wrap(err, "create operator user")
+		return errors.Wrap(err, "create operator user")
 	}
 
 	_, err = u.db.Exec("GRANT ALL ON *.* TO 'xtrabackup'@'%'")
@@ -172,26 +254,20 @@ func (u *Manager) Update170XtrabackupUser(pass string) (err error) {
 		return errors.Wrapf(err, "grant privileges to user xtrabackup")
 	}
 
-	_, err = u.db.Exec("FLUSH PRIVILEGES")
-	if err != nil {
-		return errors.Wrap(err, "flush privileges")
-	}
-
 	return nil
 }
 
 // Update1100SystemUserPrivilege grants system_user privilege for monitor and clustercheck users
-func (u *Manager) Update1100SystemUserPrivilege() (err error) {
-	if _, err := u.db.Exec("GRANT SYSTEM_USER ON *.* TO 'monitor'@'%'"); err != nil {
-		return errors.Wrap(err, "monitor user")
-	}
-
-	if _, err := u.db.Exec("GRANT SYSTEM_USER ON *.* TO 'clustercheck'@'localhost'"); err != nil {
-		return errors.Wrap(err, "clustercheck user")
-	}
-
-	if _, err := u.db.Exec("FLUSH PRIVILEGES"); err != nil {
-		return errors.Wrap(err, "flush privileges")
+func (u *Manager) Update1100SystemUserPrivilege(user *SysUser) (err error) {
+	switch user.Name {
+	case Monitor:
+		if _, err := u.db.Exec("GRANT SYSTEM_USER ON *.* TO 'monitor'@'%'"); err != nil {
+			return errors.Wrap(err, "monitor user")
+		}
+	case Clustercheck:
+		if _, err := u.db.Exec("GRANT SYSTEM_USER ON *.* TO 'clustercheck'@'localhost'"); err != nil {
+			return errors.Wrap(err, "clustercheck user")
+		}
 	}
 
 	return nil
@@ -201,17 +277,12 @@ func (u *Manager) CreateReplicationUser(password string) error {
 
 	_, err := u.db.Exec("CREATE USER IF NOT EXISTS 'replication'@'%' IDENTIFIED BY ?", password)
 	if err != nil {
-			return errors.Wrap(err, "create replication user")
+		return errors.Wrap(err, "create replication user")
 	}
 
 	_, err = u.db.Exec("GRANT REPLICATION SLAVE ON *.* to 'replication'@'%'")
 	if err != nil {
-			return errors.Wrap(err, "grant replication user")
-	}
-
-	_, err = u.db.Exec("FLUSH PRIVILEGES")
-	if err != nil {
-			return errors.Wrap(err, "flush privileges")
+		return errors.Wrap(err, "grant replication user")
 	}
 
 	return nil

@@ -2,13 +2,17 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"k8s.io/klog/v2"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
+	"k8s.io/klog/v2"
+
 	certmgrscheme "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/scheme"
+	"github.com/go-logr/logr"
+	uzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -33,12 +37,6 @@ var (
 	setupLog  = ctrl.Log.WithName("setup")
 )
 
-func printVersion() {
-	setupLog.Info(fmt.Sprintf("Git commit: %s Git branch: %s Build time: %s", GitCommit, GitBranch, BuildTime))
-	setupLog.Info(fmt.Sprintf("Go Version: %s", runtime.Version()))
-	setupLog.Info(fmt.Sprintf("Go OS/Arch: %s/%s", runtime.GOOS, runtime.GOARCH))
-}
-
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
@@ -51,7 +49,8 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 
 	opts := zap.Options{
-		Development: false,
+		Encoder: getLogEncoder(setupLog),
+		Level:   getLogLevel(setupLog),
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -70,11 +69,17 @@ func main() {
 	}
 	setupLog.Info("Runs on", "platform", sv.Platform, "version", sv.Info)
 
-	printVersion()
+	setupLog.Info("Manager starting up", "gitCommit", GitCommit, "gitBranch", GitBranch,
+		"goVersion", runtime.Version(), "os", runtime.GOOS, "arch", runtime.GOARCH)
 
 	namespace, err := k8s.GetWatchNamespace()
 	if err != nil {
 		setupLog.Error(err, "failed to get watch namespace")
+		os.Exit(1)
+	}
+	operatorNamespace, err := k8s.GetOperatorNamespace()
+	if err != nil {
+		setupLog.Error(err, "failed to get operators' namespace")
 		os.Exit(1)
 	}
 
@@ -89,9 +94,9 @@ func main() {
 	}
 
 	// Add support for MultiNamespace set in WATCH_NAMESPACE
-	if strings.Contains(namespace, ",") {
+	if len(namespace) > 0 {
 		options.Namespace = ""
-		options.NewCache = cache.MultiNamespacedCacheBuilder(strings.Split(namespace, ","))
+		options.NewCache = cache.MultiNamespacedCacheBuilder(append(strings.Split(namespace, ","), operatorNamespace))
 	}
 
 	// Get a config to talk to the apiserver
@@ -157,5 +162,44 @@ func main() {
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "manager exited non-zero")
 		os.Exit(1)
+	}
+}
+
+func getLogEncoder(log logr.Logger) zapcore.Encoder {
+	consoleEnc := zapcore.NewConsoleEncoder(uzap.NewDevelopmentEncoderConfig())
+
+	s, found := os.LookupEnv("LOG_STRUCTURED")
+	if !found {
+		return consoleEnc
+	}
+
+	useJson, err := strconv.ParseBool(s)
+	if err != nil {
+		log.Info("Can't parse LOG_STRUCTURED env var, using console logger", "envVar", s)
+		return consoleEnc
+	}
+	if !useJson {
+		return consoleEnc
+	}
+
+	return zapcore.NewJSONEncoder(uzap.NewProductionEncoderConfig())
+}
+
+func getLogLevel(log logr.Logger) zapcore.LevelEnabler {
+	l, found := os.LookupEnv("LOG_LEVEL")
+	if !found {
+		return zapcore.InfoLevel
+	}
+
+	switch strings.ToUpper(l) {
+	case "DEBUG":
+		return zapcore.DebugLevel
+	case "INFO":
+		return zapcore.InfoLevel
+	case "ERROR":
+		return zapcore.ErrorLevel
+	default:
+		log.Info("Unsupported log level", "level", l)
+		return zapcore.InfoLevel
 	}
 }

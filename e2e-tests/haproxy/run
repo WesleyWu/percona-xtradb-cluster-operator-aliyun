@@ -35,7 +35,9 @@ check_haproxy_writer() {
 main() {
 	create_infra $namespace
 
-	if version_gt "1.19" && [ $EKS -ne 1 ]; then
+	if version_gt "1.24"; then
+		apply_config "$test_dir/conf/container-rc.yaml"
+	elif version_gt "1.19" && [ $EKS -ne 1 ]; then
 		apply_config "$test_dir/conf/container-rc.yaml"
 	else
 		apply_config "$test_dir/conf/docker-rc.yaml"
@@ -51,6 +53,8 @@ main() {
 
 	desc 'delete active writer and checking all haproxy pods still point to the same writer'
 	kubectl_bin delete pod $cluster-pxc-0
+	sleep 3
+	kubectl_bin get pods
 	check_haproxy_writer
 
 	desc 'check advanced options are enabled in haproxy statefulset'
@@ -74,13 +78,13 @@ main() {
 
 	compare_mysql_cmd_local "ping_timeout_server" \
 		"SELECT * FROM global_variables WHERE variable_name = '\''mysql-ping_timeout_server'\'';" \
-		"-h127.0.0.1 -P6032 -uproxyadmin -padmin_password" "$cluster-proxysql-0" "" -c'proxysql'
+		"-h127.0.0.1 -P6032 -uproxyadmin -padmin_password" "$cluster-proxysql-0" "" 'proxysql'
 	apply_config "$test_dir/conf/config-secret-proxysql.yaml"
 	wait_cluster_consistency "$cluster" 3 2
 	compare_kubectl statefulset/$cluster-proxysql "-secret"
 	compare_mysql_cmd_local "ping_timeout_server" \
 		"SELECT * FROM global_variables WHERE variable_name = '\''mysql-ping_timeout_server'\'';" \
-		"-h127.0.0.1 -P6032 -uproxyadmin -padmin_password" "$cluster-proxysql-0" "-secret" -c'proxysql'
+		"-h127.0.0.1 -P6032 -uproxyadmin -padmin_password" "$cluster-proxysql-0" "-secret" 'proxysql'
 	wait_cluster_consistency "$cluster" 3 2
 
 	desc 're-enable haproxy'

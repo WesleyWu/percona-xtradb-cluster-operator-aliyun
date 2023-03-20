@@ -8,6 +8,11 @@ import (
 	api "github.com/percona/percona-xtradb-cluster-operator/pkg/apis/pxc/v1"
 )
 
+const (
+	// HeadlessServiceAnnotation is the annotation key for headless service
+	HeadlessServiceAnnotation = "percona.com/headless-service"
+)
+
 func NewServicePXC(cr *api.PerconaXtraDBCluster) *corev1.Service {
 	obj := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -197,10 +202,12 @@ func NewServiceProxySQL(cr *api.PerconaXtraDBCluster) *corev1.Service {
 		"app.kubernetes.io/instance": cr.Name,
 	}
 	loadBalancerSourceRanges := []string{}
+	loadBalancerIP := ""
 	if cr.Spec.ProxySQL != nil {
 		serviceAnnotations = cr.Spec.ProxySQL.ServiceAnnotations
 		serviceLabels = fillServiceLabels(serviceLabels, cr.Spec.ProxySQL.ServiceLabels)
 		loadBalancerSourceRanges = cr.Spec.ProxySQL.LoadBalancerSourceRanges
+		loadBalancerIP = cr.Spec.ProxySQL.LoadBalancerIP
 	}
 	obj := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -227,6 +234,7 @@ func NewServiceProxySQL(cr *api.PerconaXtraDBCluster) *corev1.Service {
 				"app.kubernetes.io/component": "proxysql",
 			},
 			LoadBalancerSourceRanges: loadBalancerSourceRanges,
+			LoadBalancerIP:           loadBalancerIP,
 		},
 	}
 
@@ -237,6 +245,13 @@ func NewServiceProxySQL(cr *api.PerconaXtraDBCluster) *corev1.Service {
 		}
 
 		obj.Spec.ExternalTrafficPolicy = svcTrafficPolicyType
+	}
+
+	if cr.Spec.ProxySQL != nil && cr.Spec.ProxySQL.ServiceAnnotations != nil {
+		if cr.Spec.ProxySQL.ServiceAnnotations[HeadlessServiceAnnotation] == "true" && svcType == corev1.ServiceTypeClusterIP {
+			obj.Annotations[HeadlessServiceAnnotation] = "true"
+			obj.Spec.ClusterIP = corev1.ClusterIPNone
+		}
 	}
 
 	if cr.CompareVersionWith("1.6.0") >= 0 {
@@ -257,7 +272,7 @@ func NewServiceProxySQL(cr *api.PerconaXtraDBCluster) *corev1.Service {
 	return obj
 }
 
-func NewServiceHAProxy(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerReference) *corev1.Service {
+func NewServiceHAProxy(cr *api.PerconaXtraDBCluster) *corev1.Service {
 	svcType := corev1.ServiceTypeClusterIP
 	if cr.Spec.HAProxy != nil && len(cr.Spec.HAProxy.ServiceType) > 0 {
 		svcType = cr.Spec.HAProxy.ServiceType
@@ -272,10 +287,12 @@ func NewServiceHAProxy(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerRefer
 		"app.kubernetes.io/part-of":    "percona-xtradb-cluster",
 	}
 	loadBalancerSourceRanges := []string{}
+	loadBalancerIP := ""
 	if cr.Spec.HAProxy != nil {
 		serviceAnnotations = cr.Spec.HAProxy.ServiceAnnotations
 		serviceLabels = fillServiceLabels(serviceLabels, cr.Spec.HAProxy.PodSpec.ServiceLabels)
 		loadBalancerSourceRanges = cr.Spec.HAProxy.LoadBalancerSourceRanges
+		loadBalancerIP = cr.Spec.HAProxy.LoadBalancerIP
 	}
 
 	obj := &corev1.Service{
@@ -284,11 +301,10 @@ func NewServiceHAProxy(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerRefer
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            cr.HaproxyServiceNamespacedName().Name,
-			Namespace:       cr.Namespace,
-			Labels:          serviceLabels,
-			Annotations:     serviceAnnotations,
-			OwnerReferences: owners,
+			Name:        cr.HaproxyServiceNamespacedName().Name,
+			Namespace:   cr.Namespace,
+			Labels:      serviceLabels,
+			Annotations: serviceAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type: svcType,
@@ -310,6 +326,7 @@ func NewServiceHAProxy(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerRefer
 				"app.kubernetes.io/component": "haproxy",
 			},
 			LoadBalancerSourceRanges: loadBalancerSourceRanges,
+			LoadBalancerIP:           loadBalancerIP,
 		},
 	}
 
@@ -344,10 +361,17 @@ func NewServiceHAProxy(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerRefer
 		)
 	}
 
+	if cr.Spec.HAProxy != nil && cr.Spec.HAProxy.ServiceAnnotations != nil {
+		if cr.Spec.HAProxy.ServiceAnnotations[HeadlessServiceAnnotation] == "true" && svcType == corev1.ServiceTypeClusterIP {
+			obj.Annotations[HeadlessServiceAnnotation] = "true"
+			obj.Spec.ClusterIP = corev1.ClusterIPNone
+		}
+	}
+
 	return obj
 }
 
-func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.OwnerReference) *corev1.Service {
+func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster) *corev1.Service {
 	svcType := corev1.ServiceTypeClusterIP
 	if cr.Spec.HAProxy != nil && len(cr.Spec.HAProxy.ReplicasServiceType) > 0 {
 		svcType = cr.Spec.HAProxy.ReplicasServiceType
@@ -360,6 +384,7 @@ func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.Ow
 		"app.kubernetes.io/managed-by": "percona-xtradb-cluster-operator",
 		"app.kubernetes.io/part-of":    "percona-xtradb-cluster"}
 	loadBalancerSourceRanges := []string{}
+	loadBalancerIP := ""
 	if cr.Spec.HAProxy != nil {
 		if cr.CompareVersionWith("1.12.0") >= 0 {
 			serviceAnnotations = cr.Spec.HAProxy.ReplicasServiceAnnotations
@@ -368,7 +393,12 @@ func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.Ow
 			serviceAnnotations = cr.Spec.HAProxy.ServiceAnnotations
 			serviceLabels = fillServiceLabels(serviceLabels, cr.Spec.HAProxy.PodSpec.ServiceLabels)
 		}
-		loadBalancerSourceRanges = cr.Spec.HAProxy.LoadBalancerSourceRanges
+		if cr.Spec.HAProxy.ReplicasLoadBalancerSourceRanges != nil {
+			loadBalancerSourceRanges = cr.Spec.HAProxy.ReplicasLoadBalancerSourceRanges
+		} else {
+			loadBalancerSourceRanges = cr.Spec.HAProxy.LoadBalancerSourceRanges
+		}
+		loadBalancerIP = cr.Spec.HAProxy.ReplicasLoadBalancerIP
 	}
 	obj := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -376,11 +406,10 @@ func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.Ow
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            cr.HAProxyReplicasNamespacedName().Name,
-			Namespace:       cr.Namespace,
-			Labels:          serviceLabels,
-			Annotations:     serviceAnnotations,
-			OwnerReferences: owners,
+			Name:        cr.HAProxyReplicasNamespacedName().Name,
+			Namespace:   cr.Namespace,
+			Labels:      serviceLabels,
+			Annotations: serviceAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type: svcType,
@@ -397,6 +426,7 @@ func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.Ow
 				"app.kubernetes.io/component": "haproxy",
 			},
 			LoadBalancerSourceRanges: loadBalancerSourceRanges,
+			LoadBalancerIP:           loadBalancerIP,
 		},
 	}
 
@@ -407,6 +437,13 @@ func NewServiceHAProxyReplicas(cr *api.PerconaXtraDBCluster, owners ...metav1.Ow
 		}
 
 		obj.Spec.ExternalTrafficPolicy = svcTrafficPolicyType
+	}
+
+	if cr.Spec.HAProxy != nil && cr.Spec.HAProxy.ReplicasServiceAnnotations != nil {
+		if cr.Spec.HAProxy.ReplicasServiceAnnotations[HeadlessServiceAnnotation] == "true" && svcType == corev1.ServiceTypeClusterIP {
+			obj.Annotations[HeadlessServiceAnnotation] = "true"
+			obj.Spec.ClusterIP = corev1.ClusterIPNone
+		}
 	}
 
 	return obj

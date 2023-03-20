@@ -1,0 +1,70 @@
+#!/bin/bash
+
+set -o errexit
+set -o xtrace
+
+test_dir=$(realpath $(dirname $0))
+. ${test_dir}/../functions
+
+run_recovery_from_source() {
+	desc "aws restore with backup source"
+
+	stext=$(kubectl_bin get pxc-backup on-demand-backup-aws-s3 -o json | jq -c '.status')
+	jq --argjson s "$stext" '.spec.backupSource=$s' $test_dir/conf/restore-from-source-backup-aws-s3.json \
+		| kubectl_bin apply -f -
+	sleep 30
+	wait_for_running "$cluster-proxysql" 1
+	wait_for_running "$cluster-pxc" 3
+	sleep 30
+	desc 'check data after backup from source'
+	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-0.$cluster-pxc -uroot -proot_password"
+	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-1.$cluster-pxc -uroot -proot_password"
+	compare_mysql_cmd "select-1" "SELECT * from myApp.myApp;" "-h $cluster-pxc-2.$cluster-pxc -uroot -proot_password"
+
+}
+
+main() {
+	if [ -n "$SKIP_REMOTE_BACKUPS" ]; then
+		echo "Skipping test because SKIP_REMOTE_BACKUPS variable is set!"
+		exit 0
+	else
+		create_infra $namespace
+
+		cluster="demand-backup-cloud"
+		spinup_pxc "$cluster" "$test_dir/conf/$cluster.yml"
+
+		backup_name_aws="on-demand-backup-aws-s3"
+		backup_name_gcp="on-demand-backup-gcp-cs"
+		backup_name_azure="on-demand-backup-azure-blob"
+
+		run_backup "$cluster" "${backup_name_aws}"
+		run_recovery_check "$cluster" "${backup_name_aws}"
+
+		run_recovery_from_source
+
+		run_backup "$cluster" "${backup_name_gcp}"
+		run_recovery_check "$cluster" "${backup_name_gcp}"
+
+		run_backup "$cluster" "${backup_name_azure}"
+		run_recovery_check "$cluster" "${backup_name_azure}"
+
+		backup_dest_aws=$(kubectl_bin get pxc-backup "$backup_name_aws" -o jsonpath='{.status.destination}' | sed -e 's/.json$//' | cut -c 6-)
+		backup_dest_gcp=$(kubectl_bin get pxc-backup "$backup_name_gcp" -o jsonpath='{.status.destination}' | sed -e 's/.json$//' | cut -c 6-)
+		backup_dest_azure=$(kubectl_bin get pxc-backup "$backup_name_azure" -o jsonpath='{.status.destination}' | sed -e 's/.json$//')
+
+		desc "Check backup existence"
+		check_backup_existence "https://s3.amazonaws.com/${backup_dest_aws}.sst_info/sst_info.00000000000000000000" "aws-s3"
+		check_backup_existence "https://storage.googleapis.com/${backup_dest_gcp}.sst_info/sst_info.00000000000000000000" "gcp-cs"
+		check_backup_existence "https://engk8soperators.blob.core.windows.net/${backup_dest_azure}.sst_info/sst_info.00000000000000000000" "azure-blob"
+
+		kubectl_bin delete pxc-backup --all
+
+		desc "Check backup deletion"
+		check_backup_deletion "https://s3.amazonaws.com/${backup_dest_aws}.sst_info/sst_info.00000000000000000000" "aws-s3"
+		check_backup_deletion "https://storage.googleapis.com/${backup_dest_gcp}.sst_info/sst_info.00000000000000000000" "gcp-cs"
+		check_backup_deletion "https://engk8soperators.blob.core.windows.net/${backup_dest_azure}.sst_info/sst_info.00000000000000000000" "azure-blob"
+
+		destroy $namespace
+	fi
+}
+main

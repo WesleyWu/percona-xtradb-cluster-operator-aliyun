@@ -6,17 +6,24 @@ import (
 	"fmt"
 	"math/big"
 	mrand "math/rand"
+	"strings"
 	"time"
 
-	api "github.com/percona/percona-xtradb-cluster-operator/pkg/apis/pxc/v1"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	k8serror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	api "github.com/percona/percona-xtradb-cluster-operator/pkg/apis/pxc/v1"
+	"github.com/percona/percona-xtradb-cluster-operator/pkg/pxc/users"
 )
 
+const internalSecretsPrefix = "internal-"
+
 func (r *ReconcilePerconaXtraDBCluster) reconcileUsersSecret(cr *api.PerconaXtraDBCluster) error {
+	log := r.logger(cr.Name, cr.Namespace)
+
 	secretObj := new(corev1.Secret)
 	err := r.client.Get(context.TODO(),
 		types.NamespacedName{
@@ -26,12 +33,19 @@ func (r *ReconcilePerconaXtraDBCluster) reconcileUsersSecret(cr *api.PerconaXtra
 		secretObj,
 	)
 	if err == nil {
+		if err := validatePasswords(secretObj); err != nil {
+			return errors.Wrap(err, "validate passwords")
+		}
 		isChanged, err := setUserSecretDefaults(secretObj)
 		if err != nil {
 			return errors.Wrap(err, "set user secret defaults")
 		}
 		if isChanged {
-			return r.client.Update(context.TODO(), secretObj)
+			err := r.client.Update(context.TODO(), secretObj)
+			if err == nil {
+				log.Info("User secrets updated", "secrets", cr.Spec.SecretsName)
+			}
+			return err
 		}
 		return nil
 	} else if !k8serror.IsNotFound(err) {
@@ -54,6 +68,8 @@ func (r *ReconcilePerconaXtraDBCluster) reconcileUsersSecret(cr *api.PerconaXtra
 	if err != nil {
 		return fmt.Errorf("create Users secret: %v", err)
 	}
+
+	log.Info("Created user secrets", "secrets", cr.Spec.SecretsName)
 	return nil
 }
 
@@ -80,10 +96,11 @@ const (
 	passwordMinLen = 16
 	passSymbols    = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
 		"abcdefghijklmnopqrstuvwxyz" +
-		"0123456789"
+		"0123456789" +
+		"!#$%&()*+,-.<=>?@[]^_{}~"
 )
 
-//generatePass generate random password
+// generatePass generates a random password
 func generatePass() ([]byte, error) {
 	mrand.Seed(time.Now().UnixNano())
 	ln := mrand.Intn(passwordMaxLen-passwordMinLen) + passwordMinLen
@@ -97,4 +114,19 @@ func generatePass() ([]byte, error) {
 	}
 
 	return b, nil
+}
+
+func validatePasswords(secret *corev1.Secret) error {
+	for user, pass := range secret.Data {
+		switch user {
+		case users.ProxyAdmin:
+			if strings.ContainsAny(string(pass), ";:") {
+				return errors.New("invalid proxyadmin password, don't use ';' or ':'")
+			}
+		default:
+			continue
+		}
+	}
+
+	return nil
 }

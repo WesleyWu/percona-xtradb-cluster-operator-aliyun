@@ -40,7 +40,6 @@ admin-stats_system_memory	60
 admin-telnet_admin_ifaces	(null)
 admin-telnet_stats_ifaces	(null)
 admin-vacuum_stats	true
-admin-version	2.3.2-percona-1.1
 admin-web_enabled	false
 admin-web_port	6080
 admin-web_verbosity	0
@@ -49,14 +48,13 @@ mysql-auditlog_filename
 mysql-auditlog_filesize	104857600
 mysql-aurora_max_lag_ms_only_read_from_replicas	2
 mysql-auto_increment_delay_multiplex	5
+mysql-auto_increment_delay_multiplex_timeout_ms	10000
 mysql-autocommit_false_is_transaction	false
 mysql-autocommit_false_not_reusable	false
 mysql-automatic_detect_sqli	false
 mysql-binlog_reader_connect_retry_msec	3000
-mysql-client_found_rows	true
 mysql-client_host_cache_size	0
 mysql-client_host_error_counts	0
-mysql-client_multi_statements	true
 mysql-client_session_track_gtid	true
 mysql-commands_stats	true
 mysql-connect_retries_delay	1
@@ -94,7 +92,7 @@ mysql-have_ssl	true
 mysql-hostgroup_manager_verbose	1
 mysql-init_connect	
 mysql-interfaces	0.0.0.0:3306;0.0.0.0:33062
-mysql-keep_multiplexing_variables	tx_isolation,version
+mysql-keep_multiplexing_variables	tx_isolation,transaction_isolation,version
 mysql-kill_backend_connection_when_disconnect	true
 mysql-ldap_user_variable	
 mysql-log_mysql_warnings_enabled	false
@@ -121,6 +119,9 @@ mysql-monitor_groupreplication_healthcheck_timeout	800
 mysql-monitor_groupreplication_max_transactions_behind_count	3
 mysql-monitor_groupreplication_max_transactions_behind_for_read_only	1
 mysql-monitor_history	60000
+mysql-monitor_local_dns_cache_refresh_interval	60000
+mysql-monitor_local_dns_cache_ttl	300000
+mysql-monitor_local_dns_resolver_queue_maxsize	128
 mysql-monitor_password	monitor
 mysql-monitor_ping_interval	10000
 mysql-monitor_ping_max_failures	3
@@ -131,6 +132,7 @@ mysql-monitor_read_only_interval	1000
 mysql-monitor_read_only_max_timeout_count	3
 mysql-monitor_read_only_timeout	800
 mysql-monitor_replication_lag_count	1
+mysql-monitor_replication_lag_group_by_host	false
 mysql-monitor_replication_lag_interval	10000
 mysql-monitor_replication_lag_timeout	1000
 mysql-monitor_replication_lag_use_percona_heartbeat	
@@ -142,6 +144,7 @@ mysql-monitor_username	monitor
 mysql-monitor_wait_timeout	true
 mysql-monitor_writer_is_also_reader	true
 mysql-multiplexing	true
+mysql-parse_failure_logs_digest	false
 mysql-ping_interval_server_msec	10000
 mysql-ping_timeout_server	200
 mysql-poll_timeout	2000
@@ -150,6 +153,8 @@ mysql-query_cache_size_MB	256
 mysql-query_cache_stores_empty_result	true
 mysql-query_digests	true
 mysql-query_digests_grouping_limit	3
+mysql-query_digests_groups_grouping_limit	0
+mysql-query_digests_keep_comment	false
 mysql-query_digests_lowercase	false
 mysql-query_digests_max_digest_length	2048
 mysql-query_digests_max_query_length	65000
@@ -161,7 +166,6 @@ mysql-query_processor_iterations	0
 mysql-query_retries_on_failure	1
 mysql-reset_connection_algorithm	2
 mysql-server_capabilities	571947
-mysql-server_version	5.7.36
 mysql-servers_stats	true
 mysql-session_idle_ms	1
 mysql-session_idle_show_processlist	true
@@ -187,6 +191,7 @@ mysql-threshold_resultset_size	4194304
 mysql-throttle_connections_per_sec_to_hostgroup	1000000
 mysql-throttle_max_bytes_per_second_to_client	0
 mysql-throttle_ratio_server_to_client	0
+mysql-unshun_algorithm	0
 mysql-use_tcp_keepalive	false
 mysql-verbose_query_error	false
 mysql-wait_timeout	28800000

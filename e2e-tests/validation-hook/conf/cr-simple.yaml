@@ -1,5 +1,4 @@
----
-apiVersion: pxc.percona.com/v1-10-0
+apiVersion: pxc.percona.com/v1
 kind: PerconaXtraDBCluster
 metadata:
   name: simple-pxc
@@ -7,6 +6,7 @@ spec:
   crVersion: 1.10.0
   secretsName: simple-dev-secrets
   allowUnsafeConfigurations: true
+  enableCRValidationWebhook: true
 
   haproxy:
     image: perconalab/percona-xtradb-cluster-operator:main-haproxy

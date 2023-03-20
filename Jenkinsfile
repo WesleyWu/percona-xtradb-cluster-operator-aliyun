@@ -1,35 +1,77 @@
 GKERegion='us-central1-a'
+testUrlPrefix="https://percona-jenkins-artifactory-public.s3.amazonaws.com/cloud-pxc-operator"
+tests=[]
 
-void CreateCluster(String CLUSTER_PREFIX) {
+void createCluster(String CLUSTER_SUFFIX) {
     withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
         sh """
             NODES_NUM=3
-            export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_PREFIX}
+            export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_SUFFIX}
             export USE_GKE_GCLOUD_AUTH_PLUGIN=True
             source $HOME/google-cloud-sdk/path.bash.inc
-            gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
-            gcloud config set project $GCP_PROJECT
-            gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_PREFIX} --zone $GKERegion --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
-            gcloud container clusters create --zone $GKERegion $CLUSTER_NAME-${CLUSTER_PREFIX} --cluster-version=1.21 --machine-type=n1-standard-4 --preemptible --num-nodes=\$NODES_NUM --network=jenkins-vpc --subnetwork=jenkins-${CLUSTER_PREFIX} --no-enable-autoupgrade
-            kubectl create clusterrolebinding cluster-admin-binding --clusterrole cluster-admin --user jenkins@"$GCP_PROJECT".iam.gserviceaccount.com
+            ret_num=0
+            while [ \${ret_num} -lt 15 ]; do
+                ret_val=0
+                gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
+                gcloud config set project $GCP_PROJECT
+                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone $GKERegion --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
+                gcloud container clusters create --zone $GKERegion $CLUSTER_NAME-${CLUSTER_SUFFIX} --cluster-version=1.21 --machine-type=n1-standard-4 --preemptible --num-nodes=\$NODES_NUM --network=jenkins-vpc --subnetwork=jenkins-${CLUSTER_SUFFIX} --no-enable-autoupgrade --cluster-ipv4-cidr=/21 --labels delete-cluster-after-hours=6 && \
+                kubectl create clusterrolebinding cluster-admin-binding --clusterrole cluster-admin --user jenkins@"$GCP_PROJECT".iam.gserviceaccount.com || ret_val=\$?
+                if [ \${ret_val} -eq 0 ]; then break; fi
+                ret_num=\$((ret_num + 1))
+            done
+            if [ \${ret_num} -eq 15 ]; then
+                gcloud container clusters list --filter $CLUSTER_NAME-${CLUSTER_SUFFIX} --zone $GKERegion --format='csv[no-heading](name)' | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
+                exit 1
+            fi
         """
    }
 }
-void ShutdownCluster(String CLUSTER_PREFIX) {
+
+void shutdownCluster(String CLUSTER_SUFFIX) {
     withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
         sh """
-            export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_PREFIX}
+            export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_SUFFIX}
             export USE_GKE_GCLOUD_AUTH_PLUGIN=True
             source $HOME/google-cloud-sdk/path.bash.inc
             gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
             gcloud config set project $GCP_PROJECT
-            gcloud container clusters delete --zone $GKERegion $CLUSTER_NAME-${CLUSTER_PREFIX}
+            gcloud container clusters delete --zone $GKERegion $CLUSTER_NAME-${CLUSTER_SUFFIX}
         """
    }
 }
+
+void deleteOldClusters(String FILTER) {
+    withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
+        sh """
+            if [ -f $HOME/google-cloud-sdk/path.bash.inc ]; then
+                export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+                source $HOME/google-cloud-sdk/path.bash.inc
+                gcloud auth activate-service-account --key-file $CLIENT_SECRET_FILE
+                gcloud config set project $GCP_PROJECT
+                for GKE_CLUSTER in \$(gcloud container clusters list --format='csv[no-heading](name)' --filter="$FILTER"); do
+                    GKE_CLUSTER_STATUS=\$(gcloud container clusters list --format='csv[no-heading](status)' --filter="\$GKE_CLUSTER")
+                    retry=0
+                    while [ "\$GKE_CLUSTER_STATUS" == "PROVISIONING" ]; do
+                        echo "Cluster \$GKE_CLUSTER is being provisioned, waiting before delete."
+                        sleep 10
+                        GKE_CLUSTER_STATUS=\$(gcloud container clusters list --format='csv[no-heading](status)' --filter="\$GKE_CLUSTER")
+                        let retry+=1
+                        if [ \$retry -ge 60 ]; then
+                            echo "Cluster \$GKE_CLUSTER to delete is being provisioned for too long. Skipping..."
+                            break
+                        fi
+                    done
+                    gcloud container clusters delete --async --zone $GKERegion --quiet \$GKE_CLUSTER || true
+                done
+            fi
+        """
+   }
+}
+
 void pushLogFile(String FILE_NAME) {
-    LOG_FILE_PATH="e2e-tests/logs/${FILE_NAME}.log"
-    LOG_FILE_NAME="${FILE_NAME}.log"
+    def LOG_FILE_PATH="e2e-tests/logs/${FILE_NAME}.log"
+    def LOG_FILE_NAME="${FILE_NAME}.log"
     echo "Push logfile $LOG_FILE_NAME file to S3!"
     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AMI/OVF', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
         sh """
@@ -39,6 +81,7 @@ void pushLogFile(String FILE_NAME) {
         """
     }
 }
+
 void pushArtifactFile(String FILE_NAME) {
     echo "Push $FILE_NAME file to S3!"
 
@@ -52,66 +95,130 @@ void pushArtifactFile(String FILE_NAME) {
     }
 }
 
-void popArtifactFile(String FILE_NAME) {
-    echo "Try to get $FILE_NAME file from S3!"
+void initTests() {
+    echo "Populating tests into the tests array!"
+
+    def records = readCSV file: 'e2e-tests/run-pr.csv'
+
+    for (int i=0; i<records.size(); i++) {
+        tests.add(["name": records[i][0], "mysql_ver": records[i][1], "cluster": "NA", "result": "skipped", "time": "0"])
+    }
+
+    markPassedTests()
+}
+
+void markPassedTests() {
+    echo "Marking passed tests in the tests map!"
 
     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: 'AMI/OVF', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
         sh """
-            S3_PATH=s3://percona-jenkins-artifactory/\$JOB_NAME/\$(git rev-parse --short HEAD)
-            aws s3 cp --quiet \$S3_PATH/${FILE_NAME} ${FILE_NAME} || :
+            aws s3 ls "s3://percona-jenkins-artifactory/${JOB_NAME}/${env.GIT_SHORT_COMMIT}/" || :
         """
+
+        for (int i=0; i<tests.size(); i++) {
+            def testNameWithMysqlVersion = tests[i]["name"] +"-"+ tests[i]["mysql_ver"].replace(".", "-")
+            def file="${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion"
+            def retFileExists = sh(script: "aws s3api head-object --bucket percona-jenkins-artifactory --key ${JOB_NAME}/${env.GIT_SHORT_COMMIT}/${file} >/dev/null 2>&1", returnStatus: true)
+
+            if (retFileExists == 0) {
+                tests[i]["result"] = "passed"
+            }
+        }
     }
+}
+
+void printKubernetesStatus(String LOCATION, String CLUSTER_SUFFIX) {
+    sh """
+        export KUBECONFIG=/tmp/$CLUSTER_NAME-$CLUSTER_SUFFIX
+        export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+        source $HOME/google-cloud-sdk/path.bash.inc
+        echo "========== KUBERNETES STATUS $LOCATION TEST =========="
+        gcloud container clusters list|grep -E "NAME|$CLUSTER_NAME-$CLUSTER_SUFFIX "
+        echo
+        kubectl get nodes
+        echo
+        kubectl top nodes
+        echo
+        kubectl get pods --all-namespaces
+        echo
+        kubectl top pod --all-namespaces
+        echo
+        kubectl get events --field-selector type!=Normal --all-namespaces
+        echo "======================================================"
+    """
 }
 
 TestsReport = '| Test name  | Status |\r\n| ------------- | ------------- |'
-testsReportMap  = [:]
-testsResultsMap = [:]
+TestsReportXML = '<testsuite name=\\"PXC\\">\n'
 
 void makeReport() {
-    def wholeTestAmount=sh(script: 'cat e2e-tests/run | grep "|| fail"| wc -l', , returnStdout: true).trim()
-    def startedTestAmount = testsReportMap.size()
-    for ( test in testsReportMap ) {
-        TestsReport = TestsReport + "\r\n| ${test.key} | ${test.value} |"
+    def wholeTestAmount=tests.size()
+    def startedTestAmount = 0
+    
+    for (int i=0; i<tests.size(); i++) {
+        def testResult = tests[i]["result"]
+        def testTime = tests[i]["time"]
+        def testNameWithMysqlVersion = tests[i]["name"] +"-"+ tests[i]["mysql_ver"].replace(".", "-")
+        def testUrl = "${testUrlPrefix}/${env.GIT_BRANCH}/${env.GIT_SHORT_COMMIT}/${testNameWithMysqlVersion}.log"
+
+        if (tests[i]["result"] != "skipped") {
+            startedTestAmount++
+        }
+        TestsReport = TestsReport + "\r\n| "+ testNameWithMysqlVersion +" | ["+ tests[i]["result"] +"]("+ testUrl +") |"
+        TestsReportXML = TestsReportXML + '<testcase name=\\"' + testNameWithMysqlVersion + '\\" time=\\"' + testTime + '\\"><'+ testResult +'/></testcase>\n'
     }
     TestsReport = TestsReport + "\r\n| We run $startedTestAmount out of $wholeTestAmount|"
+    TestsReportXML = TestsReportXML + '</testsuite>\n'
 }
 
-void setTestsresults() {
-    testsResultsMap.each { file ->
-        pushArtifactFile("${file.key}")
+void clusterRunner(String cluster) {
+    def clusterCreated=0
+
+    for (int i=0; i<tests.size(); i++) {
+        if (tests[i]["result"] == "skipped" && currentBuild.nextBuild == null) {
+            tests[i]["result"] = "failure"
+            tests[i]["cluster"] = cluster
+            if (clusterCreated == 0) {
+                createCluster(cluster)
+                clusterCreated++
+            }
+            runTest(i)
+        }
+    }
+
+    if (clusterCreated >= 1) {
+        shutdownCluster(cluster)
     }
 }
 
-void runTest(String TEST_NAME, String CLUSTER_PREFIX, String MYSQL_VERSION) {
+void runTest(Integer TEST_ID) {
     def retryCount = 0
-    def testNameWithMysqlVersion = "$TEST_NAME-$MYSQL_VERSION".replace(".", "-")
+    def testName = tests[TEST_ID]["name"]
+    def mysqlVer = tests[TEST_ID]["mysql_ver"]
+    def clusterSuffix = tests[TEST_ID]["cluster"]
+    def testNameWithMysqlVersion = "$testName-$mysqlVer".replace(".", "-")
+
     waitUntil {
-        def testUrl = "https://percona-jenkins-artifactory-public.s3.amazonaws.com/cloud-pxc-operator/${env.GIT_BRANCH}/${env.GIT_SHORT_COMMIT}/${testNameWithMysqlVersion}.log"
-        echo " test url is $testUrl"
+        def timeStart = new Date().getTime()
         try {
-            echo "The $TEST_NAME test was started!"
-            testsReportMap["$testNameWithMysqlVersion"] = "[failed]($testUrl)"
-            popArtifactFile("${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion")
+            echo "The $testName-$mysqlVer test was started on cluster $CLUSTER_NAME-$clusterSuffix !"
+            tests[TEST_ID]["result"] = "failure"
 
             timeout(time: 90, unit: 'MINUTES') {
                 sh """
-                    if [ -f "${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion" ]; then
-                        echo Skip $TEST_NAME test
-                    else
-                        export KUBECONFIG=/tmp/$CLUSTER_NAME-${CLUSTER_PREFIX}
-                        export MYSQL_VERSION=$MYSQL_VERSION
-                        source $HOME/google-cloud-sdk/path.bash.inc
-                        time bash ./e2e-tests/$TEST_NAME/run
-                    fi
+                    export KUBECONFIG=/tmp/$CLUSTER_NAME-$clusterSuffix
+                    export MYSQL_VERSION=$mysqlVer
+                    source $HOME/google-cloud-sdk/path.bash.inc
+                    time bash ./e2e-tests/$testName/run
                 """
             }
-            echo "end test url is $testUrl"
-            testsReportMap["$testNameWithMysqlVersion"] = "[passed]($testUrl)"
-            testsResultsMap["${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion"] = 'passed'
+            pushArtifactFile("${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}-$testNameWithMysqlVersion")
+            tests[TEST_ID]["result"] = "passed"
             return true
         }
         catch (exc) {
-            if (retryCount >= 2) {
+            printKubernetesStatus("AFTER","$clusterSuffix")
+            if (retryCount >= 1 || currentBuild.nextBuild != null) {
                 currentBuild.result = 'FAILURE'
                 return true
             }
@@ -119,22 +226,17 @@ void runTest(String TEST_NAME, String CLUSTER_PREFIX, String MYSQL_VERSION) {
             return false
         }
         finally {
+            def timeStop = new Date().getTime()
+            def durationSec = (timeStop - timeStart) / 1000
+            tests[TEST_ID]["time"] = durationSec
             pushLogFile("$testNameWithMysqlVersion")
-            echo "The $TEST_NAME test was finished!"
+            echo "The $testName-$mysqlVer test was finished!"
         }
     }
 }
 
-void installRpms() {
-    sh '''
-        sudo yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm || true
-        sudo percona-release enable-only tools
-        sudo yum install -y percona-xtrabackup-80 jq | true
-    '''
-}
-
 def skipBranchBuilds = true
-if ( env.CHANGE_URL ) {
+if (env.CHANGE_URL) {
     skipBranchBuilds = false
 }
 
@@ -143,14 +245,17 @@ pipeline {
         CLOUDSDK_CORE_DISABLE_PROMPTS = 1
         CLEAN_NAMESPACE = 1
         OPERATOR_NS = 'pxc-operator'
-        GIT_SHORT_COMMIT = sh(script: 'git describe --always --dirty', , returnStdout: true).trim()
+        GIT_SHORT_COMMIT = sh(script: 'git rev-parse --short HEAD', , returnStdout: true).trim()
         VERSION = "${env.GIT_BRANCH}-${env.GIT_SHORT_COMMIT}"
-        CLUSTER_NAME = sh(script: "echo jenkins-pxc-${GIT_SHORT_COMMIT} | tr '[:upper:]' '[:lower:]'", , returnStdout: true).trim()
-        AUTHOR_NAME  = sh(script: "echo ${CHANGE_AUTHOR_EMAIL} | awk -F'@' '{print \$1}'", , returnStdout: true).trim()
-        ENABLE_LOGGING="true"
+        CLUSTER_NAME = sh(script: "echo jen-pxc-${env.CHANGE_ID}-${GIT_SHORT_COMMIT}-${env.BUILD_NUMBER} | tr '[:upper:]' '[:lower:]'", , returnStdout: true).trim()
+        AUTHOR_NAME = sh(script: "echo ${CHANGE_AUTHOR_EMAIL} | awk -F'@' '{print \$1}'", , returnStdout: true).trim()
+        ENABLE_LOGGING = "true"
     }
     agent {
         label 'docker'
+    }
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
     }
     stages {
         stage('Prepare') {
@@ -160,9 +265,9 @@ pipeline {
                 }
             }
             steps {
-                installRpms()
+                initTests()
                 script {
-                    if ( AUTHOR_NAME == 'null' )  {
+                    if (AUTHOR_NAME == 'null') {
                         AUTHOR_NAME = sh(script: "git show -s --pretty=%ae | awk -F'@' '{print \$1}'", , returnStdout: true).trim()
                     }
                     for (comment in pullRequest.comments) {
@@ -174,6 +279,10 @@ pipeline {
                     }
                 }
                 sh '''
+                    sudo yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm || true
+                    sudo percona-release enable-only tools
+                    sudo yum install -y percona-xtrabackup-80 jq | true
+
                     if [ ! -d $HOME/google-cloud-sdk/bin ]; then
                         rm -rf $HOME/google-cloud-sdk
                         curl https://sdk.cloud.google.com | bash
@@ -197,6 +306,7 @@ pipeline {
                         cp $CLOUD_SECRET_FILE ./e2e-tests/conf/cloud-secret.yml
                     '''
                 }
+                deleteOldClusters("jen-pxc-$CHANGE_ID")
             }
         }
         stage('Build docker image') {
@@ -269,6 +379,7 @@ pipeline {
                             -v $WORKSPACE/src/github.com/percona/percona-xtradb-cluster-operator:/go/src/github.com/percona/percona-xtradb-cluster-operator \
                             -w /go/src/github.com/percona/percona-xtradb-cluster-operator \
                             -e GO111MODULE=on \
+                            -e GOFLAGS='-buildvcs=false' \
                             golang:1.19 sh -c 'go build -v -o percona-xtradb-cluster-operator github.com/percona/percona-xtradb-cluster-operator/cmd/manager'
                     "
                 '''
@@ -296,103 +407,49 @@ pipeline {
                 timeout(time: 3, unit: 'HOURS')
             }
             parallel {
-                stage('E2E Upgrade') {
+                stage('cluster1') {
                     steps {
-                        CreateCluster('upgrade')
-                        runTest('upgrade-haproxy', 'upgrade', '8.0')
-                        ShutdownCluster('upgrade')
-                        CreateCluster('upgrade')
-                        runTest('upgrade-proxysql', 'upgrade', '8.0')
-                        ShutdownCluster('upgrade')
-                        CreateCluster('upgrade')
-                        runTest('smart-update', 'upgrade', '8.0')
-                        runTest('upgrade-consistency', 'upgrade', '8.0')
-                        ShutdownCluster('upgrade')
+                        clusterRunner('cluster1')
                     }
                 }
-                stage('E2E Basic Tests') {
+                stage('cluster2') {
                     steps {
-                        CreateCluster('basic')
-                        runTest('haproxy', 'basic', '8.0')
-                        runTest('init-deploy', 'basic', '8.0')
-                        runTest('limits', 'basic', '8.0')
-                        runTest('monitoring-2-0', 'basic', '8.0')
-                        runTest('affinity', 'basic', '8.0')
-                        runTest('one-pod', 'basic', '8.0')
-                        runTest('auto-tuning', 'basic', '8.0')
-                        runTest('proxysql-sidecar-res-limits', 'basic', '8.0')
-                        runTest('users', 'basic', '8.0')
-                        runTest('tls-issue-self','basic', '8.0')
-                        runTest('tls-issue-cert-manager','basic', '8.0')
-                        runTest('tls-issue-cert-manager-ref','basic', '8.0')
-                        runTest('validation-hook','basic', '8.0')
-                        runTest('proxy-protocol','basic', '8.0')
-                        ShutdownCluster('basic')
+                        clusterRunner('cluster2')
                     }
                 }
-                stage('E2E Scaling') {
+                stage('cluster3') {
                     steps {
-                        CreateCluster('scaling')
-                        runTest('scaling', 'scaling', '8.0')
-                        runTest('scaling-proxysql', 'scaling', '8.0')
-                        runTest('security-context', 'scaling', '8.0')
-                        ShutdownCluster('scaling')
+                        clusterRunner('cluster3')
                     }
                 }
-                stage('E2E SelfHealing') {
+                stage('cluster4') {
                     steps {
-                        CreateCluster('selfhealing')
-                        runTest('storage', 'selfhealing', '8.0')
-                        runTest('self-healing', 'selfhealing', '8.0')
-                        runTest('self-healing-chaos', 'selfhealing', '8.0')
-                        runTest('self-healing-advanced', 'selfhealing', '8.0')
-                        runTest('self-healing-advanced-chaos', 'selfhealing', '8.0')
-                        runTest('operator-self-healing', 'selfhealing', '8.0')
-                        runTest('operator-self-healing-chaos', 'selfhealing', '8.0')
-                        ShutdownCluster('selfhealing')
+                        clusterRunner('cluster4')
                     }
                 }
-                stage('E2E Backups') {
+                stage('cluster5') {
                     steps {
-                        CreateCluster('backups')
-                        runTest('recreate', 'backups', '8.0')
-                        runTest('restore-to-encrypted-cluster', 'backups', '8.0')
-                        runTest('demand-backup', 'backups', '8.0')
-                        runTest('pitr', 'backups', '8.0')
-                        runTest('demand-backup-encrypted-with-tls', 'backups', '8.0')
-                        ShutdownCluster('backups')
+                        clusterRunner('cluster5')
                     }
                 }
-                stage('E2E Scheduled-backups') {
+                stage('cluster6') {
                     steps {
-                        CreateCluster('scheduled-backups')
-                        runTest('scheduled-backup', 'scheduled-backups', '8.0')
-                        ShutdownCluster('scheduled-backups')
+                        clusterRunner('cluster6')
                     }
                 }
-                stage('E2E BigData') {
+                stage('cluster7') {
                     steps {
-                        CreateCluster('bigdata')
-                        runTest('big-data', 'bigdata', '8.0')
-                        ShutdownCluster('bigdata')
+                        clusterRunner('cluster7')
                     }
                 }
-                stage('E2E CrossSite') {
+                stage('cluster8') {
                     steps {
-                        CreateCluster('cross-site')
-                        runTest('cross-site', 'cross-site', '8.0')
-                        ShutdownCluster('cross-site')
+                        clusterRunner('cluster8')
                     }
                 }
-                stage('E2E Mysql 5.7') {
+                stage('cluster9') {
                     steps {
-                        CreateCluster('mysql-57')
-                        runTest('users', 'mysql-57', '5.7')
-                        runTest('one-pod', 'mysql-57', '5.7')
-                        runTest('scheduled-backup', 'mysql-57', '5.7')
-                        runTest('init-deploy', 'mysql-57', '5.7')
-                        runTest('haproxy', 'mysql-57', '5.7')
-                        ShutdownCluster('mysql-57')
+                        clusterRunner('cluster9')
                     }
                 }
             }
@@ -401,9 +458,9 @@ pipeline {
     post {
         always {
             script {
-                setTestsresults()
-                if (currentBuild.result != null && currentBuild.result != 'SUCCESS') {
+                echo "CLUSTER ASSIGNMENTS\n" + tests.toString().replace("], ","]\n").replace("]]","]").replaceFirst("\\[","")
 
+                if (currentBuild.result != null && currentBuild.result != 'SUCCESS' && currentBuild.nextBuild == null) {
                     try {
                         slackSend channel: "@${AUTHOR_NAME}", color: '#FF0000', message: "[${JOB_NAME}]: build ${currentBuild.result}, ${BUILD_URL} owner: @${AUTHOR_NAME}"
                     }
@@ -411,7 +468,8 @@ pipeline {
                         slackSend channel: '#cloud-dev-ci', color: '#FF0000', message: "[${JOB_NAME}]: build ${currentBuild.result}, ${BUILD_URL} owner: @${AUTHOR_NAME}"
                     }
                 }
-                if (env.CHANGE_URL) {
+
+                if (env.CHANGE_URL && currentBuild.nextBuild == null) {
                     for (comment in pullRequest.comments) {
                         println("Author: ${comment.user}, Comment: ${comment.body}")
                         if (comment.user.equals('JNKPercona')) {
@@ -420,25 +478,24 @@ pipeline {
                         }
                     }
                     makeReport()
+                    sh """
+                        echo "${TestsReportXML}" > TestsReport.xml
+                    """
+                    step([$class: 'JUnitResultArchiver', testResults: '*.xml', healthScaleFactor: 1.0])
+                    archiveArtifacts '*.xml'
+
                     unstash 'IMAGE'
                     def IMAGE = sh(returnStdout: true, script: "cat results/docker/TAG").trim()
                     TestsReport = TestsReport + "\r\n\r\ncommit: ${env.CHANGE_URL}/commits/${env.GIT_COMMIT}\r\nimage: `${IMAGE}`\r\n"
                     pullRequest.comment(TestsReport)
                 }
             }
-            withCredentials([string(credentialsId: 'GCP_PROJECT_ID', variable: 'GCP_PROJECT'), file(credentialsId: 'gcloud-key-file', variable: 'CLIENT_SECRET_FILE')]) {
-                sh """
-                    if [ -f $HOME/google-cloud-sdk/path.bash.inc ]; then
-                        source $HOME/google-cloud-sdk/path.bash.inc
-                        gcloud auth activate-service-account --key-file \$CLIENT_SECRET_FILE
-                        gcloud config set project \$GCP_PROJECT
-                        gcloud container clusters list --format='csv[no-heading](name)' --filter $CLUSTER_NAME | xargs gcloud container clusters delete --zone $GKERegion --quiet || true
-                    fi
-                    sudo docker system prune -fa
-                    sudo rm -rf ./*
-                    sudo rm -rf $HOME/google-cloud-sdk
-                """
-            }
+            deleteOldClusters("$CLUSTER_NAME")
+            sh """
+                sudo docker system prune -fa
+                sudo rm -rf ./*
+                sudo rm -rf $HOME/google-cloud-sdk
+            """
             deleteDir()
         }
     }
